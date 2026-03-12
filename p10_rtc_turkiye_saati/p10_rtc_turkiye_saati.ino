@@ -1,18 +1,18 @@
 #include <virtuabotixRTC.h>
 #include <DMD2.h>
-#include <fonts/Arial_Black_16.h>
 #include <fonts/SystemFont5x7.h>
+#include <EEPROM.h>
 
-// ── DS1302 Pinleri ──────────────────────────────────────
-int CLK = 5;
-int DAT = 4;
-int RST = 3;
-virtuabotixRTC RTC(CLK, DAT, RST);
+#define CLK_PIN 5
+#define DAT_PIN 4
+#define RST_PIN 3
+virtuabotixRTC RTC(CLK_PIN, DAT_PIN, RST_PIN);
 
-// ── P10 Panel: 2 panel yan yana, 1 panel yüksek ─────────
-SoftDMD dmd(2, 1);  // 64x16 px toplam
+SoftDMD dmd(1, 2);
 
-// ── Ay parse ─────────────────────────────────────────────
+#define EEPROM_FLAG_ADDR 0
+#define EEPROM_FLAG_VAL  0xAB
+
 int parseMonth(const char* s) {
   const char* months[] = {"Jan","Feb","Mar","Apr","May","Jun",
                            "Jul","Aug","Sep","Oct","Nov","Dec"};
@@ -21,7 +21,6 @@ int parseMonth(const char* s) {
   return 1;
 }
 
-// ── Zeller: haftanın günü ─────────────────────────────────
 int calcDayOfWeek(int y, int m, int d) {
   if (m < 3) { m += 12; y--; }
   int k = y % 100, j = y / 100;
@@ -29,89 +28,100 @@ int calcDayOfWeek(int y, int m, int d) {
   return ((h + 6) % 7) + 1;
 }
 
-// ── Sıfır dolgulu yazdırma (örn: "09") ───────────────────
 void twoDigit(char* buf, int val) {
-  buf[0] = '0' + val / 10;
+  buf[0] = '0' + (val / 10) % 10;
   buf[1] = '0' + val % 10;
   buf[2] = '\0';
 }
 
-// ── Görüntüleme modu ─────────────────────────────────────
-enum Mode { SHOW_TIME, SHOW_DATE };
-Mode currentMode = SHOW_TIME;
-unsigned long lastSwitch = 0;
-const unsigned long TIME_DURATION = 5000;  // 5 sn saat göster
-const unsigned long DATE_DURATION = 3000;  // 3 sn tarih göster
+const char* ayIsmi(int ay) {
+const char* aylar[] = {"Ocak","Subat","Mart","Nisan","Mayis","Haziran",
+                        "Temmuz","Agustos","Eylul","Ekim","Kasim","Aralik"};
+  if (ay < 1 || ay > 12) return "???";
+  return aylar[ay - 1];
+}
+
+void clearRegion(int y1, int y2) {
+  dmd.drawFilledBox(0, y1, 31, y2, GRAPHICS_OFF);
+}
+
+void drawCentered(const char* text, int y) {
+  dmd.selectFont(SystemFont5x7);
+  int w = dmd.stringWidth(text);
+  int x = (32 - w) / 2;
+  if (x < 0) x = 0;
+  dmd.drawString(x, y, text);
+}
+
+char prevTime[8]  = "";
+char prevDate[12] = "";
 
 void setup() {
   Serial.begin(9600);
 
-  char dateStr[] = __DATE__;
-  char timeStr[] = __TIME__;
-  int ay     = parseMonth(dateStr);
-  int gun    = atoi(dateStr + 4);
-  int yil    = atoi(dateStr + 7);
-  int saat   = atoi(timeStr);
-  int dakika = atoi(timeStr + 3);
-  int saniye = atoi(timeStr + 6);
-  int gun_no = calcDayOfWeek(yil, ay, gun);
-
-  Serial.print("Zaman ayarlandı: ");
-  Serial.print(gun); Serial.print("/"); Serial.print(ay);
-  Serial.print("/"); Serial.print(yil); Serial.print("  ");
-  Serial.print(saat); Serial.print(":"); Serial.print(dakika);
-  Serial.print(":"); Serial.println(saniye);
-
-  // ⚠️ İlk yüklemeden sonra bu satırı yorum yapın!
-  RTC.setDS1302Time(saniye, dakika, saat, gun_no, gun, ay, yil);
+  if (EEPROM.read(EEPROM_FLAG_ADDR) != EEPROM_FLAG_VAL) {
+    char dateStr[] = __DATE__;
+    char timeStr[] = __TIME__;
+    int ay     = parseMonth(dateStr);
+    int gun    = atoi(dateStr + 4);
+    int yil    = atoi(dateStr + 7);
+    int saat   = atoi(timeStr);
+    int dakika = atoi(timeStr + 3);
+    int saniye = atoi(timeStr + 6);
+    int gun_no = calcDayOfWeek(yil, ay, gun);
+    RTC.setDS1302Time(saniye, dakika, saat, gun_no, gun, ay, yil);
+    EEPROM.write(EEPROM_FLAG_ADDR, EEPROM_FLAG_VAL);
+    Serial.println("RTC ilk kez ayarlandı.");
+  } else {
+    Serial.println("RTC zaten ayarlı.");
+  }
 
   dmd.begin();
   dmd.setBrightness(150);
+  dmd.clearScreen();
+
+  // ── Başlangıç testi: 2 sn her iki panel görünsün ────
+  dmd.selectFont(SystemFont5x7);
+  dmd.drawString(2, 2,  "SAAT");  // alt panel
+  dmd.drawString(2, 18, "TRH");   // üst panel
+  delay(2000);
+  dmd.clearScreen();
 }
 
 void loop() {
   RTC.updateTime();
-  unsigned long now = millis();
 
-  // Modu zamanla değiştir
-  unsigned long duration = (currentMode == SHOW_TIME) ? TIME_DURATION : DATE_DURATION;
-  if (now - lastSwitch >= duration) {
-    currentMode = (currentMode == SHOW_TIME) ? SHOW_DATE : SHOW_TIME;
-    lastSwitch = now;
-    dmd.clearScreen();
+  // ── Saat metni ───────────────────────────────────────
+  char h[3], m[3];
+  twoDigit(h, RTC.hours);
+  twoDigit(m, RTC.minutes);
+  char sep = (RTC.seconds % 2 == 0) ? ':' : ' ';
+  char timeText[8];
+  snprintf(timeText, sizeof(timeText), "%s%c%s", h, sep, m);
+
+  // ── Tarih metni ──────────────────────────────────────
+  char d[3];
+  twoDigit(d, RTC.dayofmonth);
+  const char* ayStr = ayIsmi(RTC.month);
+  char dateText[12];
+  snprintf(dateText, sizeof(dateText), "%s-%s", d, ayStr);
+
+  // ── Saat değiştiyse üst paneli güncelle (y:16-31) ────
+  if (strcmp(timeText, prevTime) != 0) {
+    clearRegion(16, 31);
+    drawCentered(timeText, 18);
+    strcpy(prevTime, timeText);
+    Serial.print("Saat: "); Serial.println(timeText);
   }
 
-  dmd.clearScreen();
-
-  if (currentMode == SHOW_TIME) {
-    // ── Saat gösterimi: "HH:MM" büyük font, ortalı ───────
-    char h[3], m[3];
-    twoDigit(h, RTC.hours);
-    twoDigit(m, RTC.minutes);
-
-    char timeText[6];
-    if (RTC.seconds % 2 == 0)
-      sprintf(timeText, "%s:%s", h, m);
-    else
-      sprintf(timeText, "%s %s", h, m);
-
-    dmd.selectFont(Arial_Black_16);
-    int x = (64 - dmd.stringWidth(timeText)) / 2;
-    if (x < 0) x = 0;
-    dmd.drawString(x, 0, timeText);
-
-  } else {
-    // ── Tarih gösterimi: "DD.MM.YYYY" küçük font, ortalı ─
-    char dateText[12];
-    char d[3], mo[3];
-    twoDigit(d, RTC.dayofmonth);
-    twoDigit(mo, RTC.month);
-    sprintf(dateText, "%s.%s.%d", d, mo, RTC.year);
-
-    dmd.selectFont(SystemFont5x7);
-    int x = (64 - dmd.stringWidth(dateText)) / 2;
-    if (x < 0) x = 0;
-    dmd.drawString(x, 4, dateText);
+  // ── Tarih değiştiyse alt paneli güncelle (y:0-15) ────
+  if (strcmp(dateText, prevDate) != 0) {
+    clearRegion(0, 15);
+    drawCentered(d,     1);   // üst satır: "12"
+    drawCentered(ayStr, 9);   // alt satır: "Mar"
+    strcpy(prevDate, dateText);
+    Serial.print("Tarih: "); Serial.print(d);
+    Serial.print(" "); Serial.println(ayStr);
   }
 
   delay(500);
